@@ -8,10 +8,10 @@
                       js/JSON.parse))
 
 (defn build-fact [{:keys [:web3.block/number :web3.event/data] :as a}]
-  {:entity (-> data :entity (.maskn 53) .toNumber)
+  {:entity (-> data :entity bn/number)
    :attribute (keyword (:attribute data))
-   :value (if (= (aget (-> data :val) "_ethersType") "BigNumber")
-            (-> data :val (.maskn 53) .toNumber)
+   :value (if (bn/bignumber? (:val data))
+            (bn/number (:val data))
             (-> data :val))
    :block-num number
    :add (boolean (:add data))})
@@ -29,16 +29,18 @@
     (web3-core/on-new-event web3
                             (web3-core/make-contract-instance facts-db-address facts-db-abi)
                             {}
-                            {:on-result #(async/put! out-ch (build-fact %))
+                            {:on-event-result #(async/put! out-ch (build-fact %))
                              :on-error #(async/put! out-ch (js/Error. "Error in event watcher"))})
 
     out-ch))
 
 (defn get-past-events [web3 facts-db-address from-block]
   (let [out-ch (async/chan)]
-    (web3-core/past-events web3
-                           (web3-core/make-contract-instance facts-db-address facts-db-abi)
-                           {:from-block from-block}
-                           {:on-result #(async/put! out-ch (map build-fact %))
-                            :on-error #(async/put! out-ch (js/Error. "Error replaying past events "))})
+    (try
+      (web3-core/past-events web3
+                            (web3-core/make-contract-instance facts-db-address facts-db-abi)
+                            {:from-block from-block}
+                            {:on-events-result (fn [events] (async/put! out-ch (map build-fact events)))
+                             :on-error #(async/put! out-ch (js/Error. "Error replaying past events "))})
+      (catch js/Error e (async/put! out-ch e)))
     out-ch))

@@ -177,4 +177,4 @@
           (loop [nf (<? new-facts-ch)]
             (d/transact! ds-conn [(fact->ds-fact nf)])
             (recur (<? new-facts-ch)))))
-      (catch js/Error e (.log js/console e)))))
+      (catch js/Error e (.error js/console e) (throw e)))))

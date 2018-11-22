@@ -140,7 +140,7 @@
           conn-obj (d/create-conn schema)
 
           ethers-provider (new (-> ethers .-providers .-JsonRpcProvider)  (str "http://" (:rpc options)))
-          web3 (make-ethers-js ethers-provider)]
+          web3 (make-ethers-js nil ethers-provider)]
       (set! js/ethers ethers)
       (async/go
         (println "Downloading past events, please wait...")
