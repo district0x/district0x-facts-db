@@ -2,7 +2,7 @@
   (:require [datascript.core :as d]
             [bignumber.core :as bn]
             [cljs.nodejs :as nodejs]
-            [district0x-facts-db.core :refer [install-facts-filter! get-past-events]]
+            [district0x-facts-db.core :refer [install-facts-filter!]]
             [clojure.core.async :as async]
             [posh.lib.pull-analyze :as posh-pull]
             [posh.lib.q-analyze :as posh-q]
@@ -10,7 +10,8 @@
             [district0x-facts-db.utils :refer [compress-facts]]
             [clojure.pprint :as pprint]
             [web3.impl.ethers-js :refer [make-ethers-js]]
-            [web3.core :as web3-core])
+            [web3.core :as web3-core]
+            [cljsjs.bignumber :as mybig])
   (:require-macros [district0x-facts-db.utils :refer [<?]]))
 
 (nodejs/enable-util-print!)
@@ -82,6 +83,14 @@
         (.write res res-content)
         (.end res))
 
+      (and (= (.-url req) "/stats")
+           (= (.-method req) "GET"))
+      (let [res-content (str "<html><body><pre>" (with-out-str (pprint/pprint @attribute-stats)) "</pre></body></html>")]
+        (.writeHead res 200 (clj->js (merge headers
+                                            {"Content-Type" "text/html"})))
+        (.write res res-content)
+        (.end res))
+
 
       (and
        (= (.-url req) "/datoms")
@@ -144,16 +153,7 @@
       (set! js/ethers ethers)
       (async/go
         (println "Downloading past events, please wait...")
-        (let [past-events (<? (get-past-events web3 (:address options) 0))
-              new-facts-ch (install-facts-filter! web3 (:address options))]
-          (println "Past events downloaded, replaying " (count past-events) " facts...")
-          ;; transact past facts
-          (doseq [f past-events]
-            (transact-fact conn-obj f))
-
-          (println "Old events replayed. Attribute stats : ")
-          (pprint/pprint @attribute-stats)
-          (println "Ready. Watching for more events...")
+        (let [new-facts-ch (install-facts-filter! web3 (:address options) 0)]
           ;; keep forever transacting new facts
           (loop [nf (<? new-facts-ch)]
             (transact-fact conn-obj nf)

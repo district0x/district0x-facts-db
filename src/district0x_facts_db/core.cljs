@@ -24,23 +24,12 @@
     out-ch))
 
 (defn install-facts-filter!
-  [web3 facts-db-address]
-  (let [out-ch (async/chan)]
-    (web3-core/on-new-event web3
-                            (web3-core/make-contract-instance facts-db-address facts-db-abi)
-                            {}
-                            {:on-event-result #(async/put! out-ch (build-fact %))
-                             :on-error #(async/put! out-ch (js/Error. "Error in event watcher"))})
+  [web3 facts-db-address from-block]
+  (let [out-ch (async/chan 200000)]
+    (web3-core/on-event web3
+                        (web3-core/make-contract-instance facts-db-address facts-db-abi)
+                        {:from-block from-block}
+                        {:on-event-result #(async/put! out-ch (build-fact %))
+                         :on-error #(async/put! out-ch (js/Error. "Error in event watcher"))})
 
-    out-ch))
-
-(defn get-past-events [web3 facts-db-address from-block]
-  (let [out-ch (async/chan)]
-    (try
-      (web3-core/past-events web3
-                            (web3-core/make-contract-instance facts-db-address facts-db-abi)
-                            {:from-block from-block}
-                            {:on-events-result (fn [events] (async/put! out-ch (map build-fact events)))
-                             :on-error #(async/put! out-ch (js/Error. "Error replaying past events "))})
-      (catch js/Error e (async/put! out-ch e)))
     out-ch))

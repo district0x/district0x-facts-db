@@ -1,5 +1,5 @@
 (ns district0x-facts-db.browser-installer
-  (:require [district0x-facts-db.core :refer [install-facts-filter! get-block-number get-past-events]]
+  (:require [district0x-facts-db.core :refer [install-facts-filter! get-block-number]]
             [datascript.core :as d]
             [clojure.core.async :as async]
             [ajax.core :refer [ajax-request] :as ajax]
@@ -8,31 +8,32 @@
   (:require-macros [district0x-facts-db.utils :refer [<?]]))
 
 
+(def batch-timeout 2000)
 
 (defn wait-for-load []
   (let [out-ch (async/chan)]
     (.addEventListener js/window "load" #(async/put! out-ch true))
     out-ch))
 
-(defn fact->ds-fact [{:keys [entity attribute value add]}]
-  [(if add :db/add :db/retract) entity attribute value])
+(defn fact->ds-fact [{:keys [entity attribute value add block-num]}]
+  (with-meta [(if add :db/add :db/retract) entity attribute value]
+    {:block-num block-num}))
 
-(defn transact-facts-batch [finish-ch ds-conn transact-batch-size progress-cb facts-to-transact total-facts so-far]
+(defn transact-facts-batch [finish-ch ds-conn transact-batch-size progress-cb facts-to-transact target-block]
   (if (empty? facts-to-transact)
-    (do
-      (progress-cb {:state :installing-facts :percentage 100})
-      (async/put! finish-ch true))
+    (async/put! finish-ch true)
 
-    (do
-      (d/transact! ds-conn (take transact-batch-size facts-to-transact))
-      (progress-cb {:state :installing-facts :percentage (quot (* 100 so-far) total-facts)})
+    (let [batch (take transact-batch-size facts-to-transact)]
+      (d/transact! ds-conn batch)
+
+      (progress-cb {:state :installing-facts :percentage (quot (* 100 (-> batch last meta :block-num)) target-block)})
+
       (js/setTimeout #(transact-facts-batch finish-ch
                                             ds-conn
                                             transact-batch-size
                                             progress-cb
                                             (drop transact-batch-size facts-to-transact)
-                                            total-facts
-                                            (+ so-far transact-batch-size))
+                                            target-block)
                      0))))
 
 (defn pre-fetch [ds-conn url pulls-and-qs]
@@ -98,7 +99,8 @@
   (async/go
     (try
       (let [stop-watch-start (.getTime (js/Date.))
-            last-block-so-far (atom 0)
+            first-block 0
+            last-block-so-far (atom first-block)
             facts-to-transact (atom #{})
             facts-to-store (atom #{})]
         (<? (wait-for-load))
@@ -147,34 +149,51 @@
 
                 (println "We couldn't download a snapshot"))))
 
+          (if transact-batch-size
+            (do
+              (when (< transact-batch-size 32) (throw (js/Error. "transact-batch-size should be nil or >= 32")))
+              (let [finish-ch (async/chan)]
+                (transact-facts-batch finish-ch ds-conn transact-batch-size progress-cb @facts-to-transact current-block-number)
+                (<? finish-ch)))
+            (d/transact! ds-conn (vec @facts-to-transact)))
+
+          (println "Storing facts")
+          (idb/store-facts @facts-to-store)
+
           ;; we already or got facts from IndexedDB or downloaded a snapshot, or we don't have anything
           ;; in any case sync the remainning from blockchain
           (println "Let's sync the remainning facts directly from the blockchain. Last block seen " @last-block-so-far)
 
-          (let [past-facts (<? (get-past-events web3 facts-db-address @last-block-so-far))]
-            (swap! facts-to-transact (fn [fs] (->> (mapv fact->ds-fact past-facts)
-                                                   (into fs))))
-            (swap! facts-to-store (fn [fs] (into fs past-facts)))))
+          ;; keep listening to new facts and transacting them to datascript db
+          (let [new-facts-ch (install-facts-filter! web3 facts-db-address @last-block-so-far)]
+            (loop [[nf to-or-fact] (async/alts! [new-facts-ch (async/timeout batch-timeout)])
+                   batch []]
 
-        (if transact-batch-size
-          (do
-            (when (< transact-batch-size 32) (throw (js/Error. "transact-batch-size should be nil or >= 32")))
-            (let [finish-ch (async/chan)]
-              (transact-facts-batch finish-ch ds-conn transact-batch-size progress-cb @facts-to-transact (count @facts-to-transact) 0)
-              (<? finish-ch)))
-          (d/transact! ds-conn (vec @facts-to-transact)))
+              (if (and (= to-or-fact new-facts-ch)
+                       (< (count batch) transact-batch-size))
+                ;; keep accumulating in the batch while we are getting facts
+                ;; and batch count is less than transact-batch-size
+                (recur (async/alts! [new-facts-ch (async/timeout batch-timeout)])
+                       (conj batch nf))
 
-        (println "Storing facts")
-        (idb/store-facts @facts-to-store)
+                ;; if we reach transact-batch-size or a batch-timeout
+                ;; transact and store whatever we have
+                (let [finish-ch (async/chan)]
+                  (when (pos? (count batch))
+                    (println "Ready, transacting " (count batch))
+                    (transact-facts-batch finish-ch
+                                          ds-conn
+                                          transact-batch-size
+                                          progress-cb
+                                          (map fact->ds-fact batch)
+                                          current-block-number)
+                    (<? finish-ch)
+                    (idb/store-facts batch))
+                  (recur (async/alts! [new-facts-ch (async/timeout batch-timeout)])
+                         (if nf [nf] []))))
+              ;; (progress-cb {:state :ready :startup-time-in-millis (- (.getTime (js/Date.)) stop-watch-start)})
+              ;; (println "Started in :" (- (.getTime (js/Date.)) stop-watch-start) " millis")
+              ;; (println "Transacting " (:block-num nf) " of " current-block-number)
 
-        (println "New facts listener installed")
-
-        (progress-cb {:state :ready :startup-time-in-millis (- (.getTime (js/Date.)) stop-watch-start)})
-        (println "Started in :" (- (.getTime (js/Date.)) stop-watch-start) " millis")
-
-        ;; keep listening to new facts and transacting them to datascript db
-        (let [new-facts-ch (install-facts-filter! web3 facts-db-address)]
-          (loop [nf (<? new-facts-ch)]
-            (d/transact! ds-conn [(fact->ds-fact nf)])
-            (recur (<? new-facts-ch)))))
+              ))))
       (catch js/Error e (.error js/console e) (throw e)))))
