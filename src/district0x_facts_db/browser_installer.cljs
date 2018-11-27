@@ -11,7 +11,7 @@
 (def batch-timeout 2000)
 
 (defn wait-for-load []
-  (let [out-ch (async/chan)]
+  (let [out-ch (async/promise-chan)]
     (.addEventListener js/window "load" #(async/put! out-ch true))
     out-ch))
 
@@ -19,25 +19,29 @@
   (with-meta [(if add :db/add :db/retract) entity attribute value]
     {:block-num block-num}))
 
-(defn transact-facts-batch [finish-ch ds-conn transact-batch-size progress-cb facts-to-transact target-block]
+(defn calc-percentage [start-block target-block block-num]
+  (quot (* 100 (- block-num start-block)) (- target-block start-block)))
+
+(defn transact-facts-batch [finish-ch ds-conn transact-batch-size progress-cb facts-to-transact start-block target-block]
   (if (empty? facts-to-transact)
     (async/put! finish-ch true)
 
     (let [batch (take transact-batch-size facts-to-transact)]
       (d/transact! ds-conn batch)
 
-      (progress-cb {:state :installing-facts :percentage (quot (* 100 (-> batch last meta :block-num)) target-block)})
+      (progress-cb {:state :installing-facts :percentage (calc-percentage start-block target-block (-> batch last meta :block-num))})
 
       (js/setTimeout #(transact-facts-batch finish-ch
                                             ds-conn
                                             transact-batch-size
                                             progress-cb
                                             (drop transact-batch-size facts-to-transact)
+                                            start-block
                                             target-block)
                      0))))
 
-(defn pre-fetch [ds-conn url pulls-and-qs]
-  (let [out-ch (async/chan)]
+(defn pre-fetch [url pulls-and-qs]
+  (let [out-ch (async/promise-chan)]
    (ajax-request {:method          :post
                   :uri             (str url "/datoms")
                   :timeout         30000
@@ -50,8 +54,7 @@
                                                  :datoms
                                                  (mapv (fn [[e a v]]
                                                          [:db/add e a v])))]
-                                 (d/transact! ds-conn datoms)
-                                 (async/put! out-ch true))
+                                 (async/put! out-ch datoms))
                                (do
                                  (.error js/console "Error pre fetching datoms")
                                  (async/close! out-ch))))})
@@ -94,7 +97,6 @@
                      (async/close! out-ch))))
     out-ch))
 
-
 (defn install [{:keys [progress-cb web3 preindexer-url facts-db-address ds-conn pre-fetch-datoms transact-batch-size]}]
   (async/go
     (try
@@ -104,7 +106,8 @@
 
         (when pre-fetch-datoms
           (println "Pre fetching datoms")
-          (<? (pre-fetch ds-conn preindexer-url pre-fetch-datoms)))
+          (let [datoms (<? (pre-fetch preindexer-url pre-fetch-datoms))]
+            (d/transact! ds-conn datoms)))
 
         (<? (idb/init-indexed-db!))
         (println "IndexedDB initialized")
@@ -144,7 +147,7 @@
                 (do
                   (when (< transact-batch-size 32) (throw (js/Error. "transact-batch-size should be nil or >= 32")))
                   (let [finish-ch (async/chan)]
-                    (transact-facts-batch finish-ch ds-conn transact-batch-size progress-cb ds-facts current-block-number)
+                    (transact-facts-batch finish-ch ds-conn transact-batch-size progress-cb ds-facts min-block current-block-number)
                     (<? finish-ch)))
                 (d/transact! ds-conn ds-facts))))
 
@@ -178,6 +181,7 @@
                                           transact-batch-size
                                           progress-cb
                                           (map fact->ds-fact batch)
+                                          min-block
                                           current-block-number)
                     (<? finish-ch)
                     (idb/store-facts batch))

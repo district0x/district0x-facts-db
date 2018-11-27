@@ -70,7 +70,8 @@
            (= (.-method req) "GET"))
       (let [res-map {:db-facts (->> (d/datoms @conn :eavt)
                                     (mapv (fn [[e a v _ x]]
-                                            [e a v (get @facts-block-number [e a v]) x])))}
+                                            [e a v (get @facts-block-number [e a v]) x]))
+                                    (sort-by (fn [[_ _ _ block-number _]] block-number)))}
             res-content (zlib.gzipSync (Buffer.from (prn-str res-map)))]
 
         (.log js/console "Content got gziped to " (.-length res-content))
