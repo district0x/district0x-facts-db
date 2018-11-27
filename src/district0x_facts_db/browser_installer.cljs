@@ -98,11 +98,7 @@
 (defn install [{:keys [progress-cb web3 preindexer-url facts-db-address ds-conn pre-fetch-datoms transact-batch-size]}]
   (async/go
     (try
-      (let [stop-watch-start (.getTime (js/Date.))
-            first-block 0
-            last-block-so-far (atom first-block)
-            facts-to-transact (atom #{})
-            facts-to-store (atom #{})]
+      (let [stop-watch-start (.getTime (js/Date.))]
         (<? (wait-for-load))
         (println "Page loaded")
 
@@ -115,54 +111,53 @@
 
         ;; First try from IndexedDB
         (let [current-block-number (<? (get-block-number web3))
-              idb-facts-count (<? (idb/get-store-facts-count))]
-          (println "Current block number is " current-block-number)
-          (println "IndexedDB contains " idb-facts-count "facts")
+              _ (println "Current block number is " current-block-number)
+              [catched-facts store?] (let [idb-facts (<? (idb/every-store-fact-ch))
+                                           idb-facts-count (count idb-facts)]
+                                       (if (pos? idb-facts-count)
+                                         (do
+                                           (println "IndexedDB contains " idb-facts-count "facts")
+                                           [idb-facts false])
 
-          (if (pos? idb-facts-count)
-            (let [last-stored-bn (<? (idb/last-stored-block-number))
-                  idb-facts (->> (<? (idb/every-store-fact-ch))
-                                 (mapv fact->ds-fact))]
-              (println "We have facts on IndexedDB. Last stored block number is " last-stored-bn)
-              (reset! last-block-so-far last-stored-bn)
-              (swap! facts-to-transact (fn [fs] (into fs idb-facts))))
+                                         ;; NO IndexDB facts, try to load a snapshot
+                                         (let [_ (println "We DON'T have IndexedDB facts, lets try to load a snapshot")
+                                               {:keys [db-facts] :as v} (<? (load-db-snapshot preindexer-url))]
+                                           (if (not-empty db-facts)
+                                             (let []
+                                               (println "We have a snapshot!")
+                                               [(->> db-facts
+                                                     (map (fn [[e a v block-num x]]
+                                                            {:entity e :attribute a :value v :block-num block-num :add x})))
+                                                true])
 
-            ;; NO IndexDB facts, try to load a snapshot
-            (let [_ (println "We DON'T have IndexedDB facts, lets try to load a snapshot")
-                  {:keys [db-facts last-seen-block] :as v} (<? (load-db-snapshot preindexer-url))]
-              (if (not-empty db-facts)
-                (let []
-                  (reset! last-block-so-far last-seen-block)
-                  (println "we have a snapshot, installing it")
-                  (swap! facts-to-transact (fn [fs] (->> db-facts
-                                                         (mapv (fn [[e a v tx x]] [(if x :db/add :db/retract) e a v]))
-                                                         (into fs))))
+                                             (do (println "We couldn't download a snapshot")
+                                                 [[] false])))))
+              min-block (or (->> catched-facts (map :block-num) (apply min)) 0)
+              max-block (or (->> catched-facts (map :block-num) (apply max)) 0)]
 
-                  (swap! facts-to-store (fn [fs]
-                                          (->> db-facts
-                                               (map (fn [[e a v block-num x]]
-                                                      {:entity e :attribute a :value v :block-num block-num :add x}))
-                                               (into fs )))))
+          (println "Transacting " (count catched-facts) " catched facts. Min known block " min-block ". Max known block " max-block)
 
-                (println "We couldn't download a snapshot"))))
+          (when-not (empty? catched-facts)
+            (let [ds-facts (->> catched-facts
+                                (mapv fact->ds-fact))]
+              (if transact-batch-size
+                (do
+                  (when (< transact-batch-size 32) (throw (js/Error. "transact-batch-size should be nil or >= 32")))
+                  (let [finish-ch (async/chan)]
+                    (transact-facts-batch finish-ch ds-conn transact-batch-size progress-cb ds-facts current-block-number)
+                    (<? finish-ch)))
+                (d/transact! ds-conn ds-facts))))
 
-          (if transact-batch-size
-            (do
-              (when (< transact-batch-size 32) (throw (js/Error. "transact-batch-size should be nil or >= 32")))
-              (let [finish-ch (async/chan)]
-                (transact-facts-batch finish-ch ds-conn transact-batch-size progress-cb @facts-to-transact current-block-number)
-                (<? finish-ch)))
-            (d/transact! ds-conn (vec @facts-to-transact)))
-
-          (println "Storing facts")
-          (idb/store-facts @facts-to-store)
+          (when store?
+            (println "Storing facts")
+            (idb/store-facts catched-facts))
 
           ;; we already or got facts from IndexedDB or downloaded a snapshot, or we don't have anything
           ;; in any case sync the remainning from blockchain
-          (println "Let's sync the remainning facts directly from the blockchain. Last block seen " @last-block-so-far)
+          (println "Let's sync the remainning facts directly from the blockchain. Last block seen " max-block)
 
           ;; keep listening to new facts and transacting them to datascript db
-          (let [new-facts-ch (install-facts-filter! web3 facts-db-address @last-block-so-far)]
+          (let [new-facts-ch (install-facts-filter! web3 facts-db-address max-block)]
             (loop [[nf to-or-fact] (async/alts! [new-facts-ch (async/timeout batch-timeout)])
                    batch []]
 

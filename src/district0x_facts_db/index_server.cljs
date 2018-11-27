@@ -25,8 +25,8 @@
 
 (defonce conn (atom nil))
 
-(defonce last-seen-block (atom 0))
 (defonce attribute-stats (atom {}))
+(defonce facts-block-number (atom {}))
 
 (defn load-schema [file-path]
   (or
@@ -37,13 +37,13 @@
 
 (defn transact-fact [conn {:keys [entity attribute value block-num] :as fact}]
   ;; (.log js/console (str "[" :db/add " " entity " " attribute " " value "]"))
-  (swap! last-seen-block (partial (fnil max 0) block-num))
   (swap! attribute-stats (fn [s] (update s attribute inc)))
+  (swap! facts-block-number assoc [entity attribute value] block-num)
+
   (d/transact! conn [[:db/add
                       entity
                       attribute
-                      value
-                      block-num]]))
+                      value]]))
 
 (def datoms-for
   (fn [db pulls-and-qs]
@@ -69,9 +69,10 @@
       (and (= (.-url req) "/db")
            (= (.-method req) "GET"))
       (let [res-map {:db-facts (->> (d/datoms @conn :eavt)
-                                    (mapv (fn [[e a v tx x]] [e a v tx x])))
-                     :last-seen-block @last-seen-block}
+                                    (mapv (fn [[e a v _ x]]
+                                            [e a v (get @facts-block-number [e a v]) x])))}
             res-content (zlib.gzipSync (Buffer.from (prn-str res-map)))]
+
         (.log js/console "Content got gziped to " (.-length res-content))
         (.writeHead res 200 (clj->js (merge headers
                                             {"Content-Type" "application/edn"
@@ -141,7 +142,7 @@
       (.exit js/process 1))
 
     (println "Connecting to " (str "http://" (:rpc options)))
-    (let [schema (load-schema (:schema options))
+    (let [schema (when-let [schema-file (:schema options)] (load-schema schema-file))
           conn-obj (d/create-conn schema)
 
           ethers-provider (new (-> ethers .-providers .-JsonRpcProvider)  (str "http://" (:rpc options)))

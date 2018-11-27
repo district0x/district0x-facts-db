@@ -78,15 +78,19 @@
               (async/put! out-ch facts-count))))
     out-ch))
 
-(defn last-stored-block-number []
+(defn min-max-block-number []
   (let [out-ch (async/chan)
         transaction (.transaction @facts-db #js ["facts"] "readonly")
         facts-store (.objectStore transaction "facts")
         block-num-index (.index facts-store "blockNum")
-        oc-req (.openCursor block-num-index nil "prev")]
+        max-req (.openCursor block-num-index nil "prev")
+        min-req (.openCursor block-num-index nil "next")]
 
-    (set! (.-onsuccess oc-req)
+    (set! (.-onsuccess max-req)
           (fn [ev]
             (let [max-block-num (-> ev .-target .-result .-value .-blockNum)]
-              (async/put! out-ch max-block-num))))
+              (set! (.-onsuccess min-req)
+                    (fn [ev]
+                      (let [min-block-num (-> ev .-target .-result .-value .-blockNum)]
+                        (async/put! out-ch [min-block-num max-block-num])))))))
     out-ch))
