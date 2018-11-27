@@ -87,8 +87,8 @@
                  (fn [success result]
                    (if success
                      (let [val {:db-facts (->> (aget result "db-facts")
-                                               (mapv (fn [[e a v]]
-                                                       [e (keyword a) v true])))
+                                               (mapv (fn [[e a v tx add?]]
+                                                       [e (keyword a) v tx add?])))
                                 :last-seen-block (aget result "last-seen-block")}]
                        (async/put! out-ch val))
                      (async/close! out-ch))))
@@ -135,16 +135,13 @@
                   (reset! last-block-so-far last-seen-block)
                   (println "we have a snapshot, installing it")
                   (swap! facts-to-transact (fn [fs] (->> db-facts
-                                                         (mapv (fn [[e a v x]] [(if x :db/add :db/retract) e a v]))
+                                                         (mapv (fn [[e a v tx x]] [(if x :db/add :db/retract) e a v]))
                                                          (into fs))))
 
                   (swap! facts-to-store (fn [fs]
                                           (->> db-facts
-                                               (map (fn [[e a v x]]
-                                                      ;; TODO Hack, storing last-seen-block as block number because
-                                                      ;; not transfering it in snapshot, works since we are only using
-                                                      ;; block number for last seen block reference
-                                                      {:entity e :attribute a :value v :block-num last-seen-block :add x}))
+                                               (map (fn [[e a v block-num x]]
+                                                      {:entity e :attribute a :value v :block-num block-num :add x}))
                                                (into fs )))))
 
                 (println "We couldn't download a snapshot"))))

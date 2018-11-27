@@ -45,10 +45,6 @@
                       value
                       block-num]]))
 
-
-;; TODO add tools.cli
-
-
 (def datoms-for
   (fn [db pulls-and-qs]
     (reduce (fn [datoms-set {:keys [type] :as x}]
@@ -73,7 +69,7 @@
       (and (= (.-url req) "/db")
            (= (.-method req) "GET"))
       (let [res-map {:db-facts (->> (d/datoms @conn :eavt)
-                                    (mapv (fn [[e a v _ x]] [e a v x])))
+                                    (mapv (fn [[e a v tx x]] [e a v tx x])))
                      :last-seen-block @last-seen-block}
             res-content (zlib.gzipSync (Buffer.from (prn-str res-map)))]
         (.log js/console "Content got gziped to " (.-length res-content))
