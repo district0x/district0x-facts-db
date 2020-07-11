@@ -9,7 +9,6 @@
             [clojure.tools.cli :refer [parse-opts]]
             [district0x-facts-db.utils :refer [compress-facts]]
             [clojure.pprint :as pprint]
-            [web3.impl.ethers-js :refer [make-ethers-js]]
             [web3.core :as web3-core]
             [cljsjs.bignumber :as mybig])
   (:require-macros [district0x-facts-db.utils :refer [<?]]))
@@ -147,7 +146,8 @@
           conn-obj (d/create-conn schema)
 
           ethers-provider (new (-> ethers .-providers .-JsonRpcProvider)  (str "http://" (:rpc options)))
-          web3 (make-ethers-js nil ethers-provider)]
+          web3 (throw (js/Error. "Web3 instance not provided. Unimplemented, broken."))
+          ]
       (set! js/ethers ethers)
       (async/go
         (println "Downloading past events, please wait...")

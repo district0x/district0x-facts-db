@@ -1,7 +1,7 @@
 (ns district0x-facts-db.core
   (:require [bignumber.core :as bn]
             [clojure.core.async :as async]
-            [web3.core :as web3-core])
+            [cljs-web3-next.core :as web3-core])
   (:require-macros [district0x-facts-db.utils :refer [slurpf]]))
 
 (def facts-db-abi (-> (slurpf "./contracts/build/FactsDb.abi")
@@ -26,10 +26,10 @@
 (defn install-facts-filter!
   [web3 facts-db-address from-block]
   (let [out-ch (async/chan 200000)]
-    (web3-core/on-event web3
-                        (web3-core/make-contract-instance facts-db-address facts-db-abi)
-                        {:from-block from-block}
-                        {:on-event-result #(async/put! out-ch (build-fact %))
-                         :on-error #(async/put! out-ch (js/Error. "Error in event watcher"))})
+    (web3-core/on-log-event web3
+                            (web3-core/make-contract-instance facts-db-address facts-db-abi)
+                            {:from-block from-block}
+                            {:on-result #(async/put! out-ch (build-fact %))
+                             :on-error #(async/put! out-ch (js/Error. "Error in event watcher"))})
 
     out-ch))
